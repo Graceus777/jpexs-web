@@ -1,0 +1,20 @@
+[package]
+name = "swf-tools"
+version = "0.1.0"
+edition = "2021"
+description = "jpexs-web browser-native SWF layer: Ruffle swf crate + wasm-bindgen (inspect now, replace/matrix next)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pinned to the verified 0.3.x API:
+#   swf::decompress_swf(&bytes[..]) -> SwfBuf
+#   swf::parse_swf(&buf) -> Swf { header: HeaderExt, tags: Vec<Tag> }
+#   HeaderExt accessors: version(), frame_rate(), num_frames(), is_action_script_3(), swf_header()
+#   swf::write_swf(&Header, &[Tag], writer)
+# Default features are pure-Rust (miniz_oxide / lzma-rs) and WASM-safe.
+# If CWS/LZMA decompression ever fails in the WASM build, enable the
+# matching optional features here instead.
+swf = "0.3"
+wasm-bindgen = "0.2"

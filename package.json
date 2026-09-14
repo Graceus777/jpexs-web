@@ -1,0 +1,15 @@
+{
+  "name": "jpexs-web",
+  "version": "0.1.0",
+  "description": "Lightweight web client for JPEXS FFDec (SWF sprite/sound/script swapping). Offline-first, FFDec CLI wrapper.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}

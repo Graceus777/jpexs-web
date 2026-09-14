@@ -1,0 +1,16 @@
+{
+  "name": "swf-tools",
+  "type": "module",
+  "description": "jpexs-web browser-native SWF layer: Ruffle swf crate + wasm-bindgen (inspect now, replace/matrix next)",
+  "version": "0.1.0",
+  "files": [
+    "swf_tools_bg.wasm",
+    "swf_tools.js",
+    "swf_tools.d.ts"
+  ],
+  "main": "swf_tools.js",
+  "types": "swf_tools.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

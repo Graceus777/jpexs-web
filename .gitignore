@@ -1,0 +1,11 @@
+node_modules/
+work/
+work/_tmp/
+.env
+server.out.log
+server.err.log
+wasm/target/
+gh.txt
+# NOTE: public/wasm-pkg/ is DELIBERATELY committed (Ruffle swf-crate WASM build).
+# Static hosts (Pages/Vercel) must serve it; rebuild via wasm/ then delete the
+# regenerated public/wasm-pkg/.gitignore (`*`) so the files stay tracked.
