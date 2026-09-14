@@ -1,0 +1,5 @@
+# Caddy reverse proxy: auto-HTTPS for $DOMAIN -> Node backend.
+# Set DOMAIN in .env next to docker-compose.yml (public DNS pointing at this VM).
+{$DOMAIN} {
+	reverse_proxy app:3000
+}
