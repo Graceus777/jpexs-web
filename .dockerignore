@@ -1,0 +1,8 @@
+node_modules
+work
+wasm/target
+.git
+server.out.log
+server.err.log
+gh.txt
+.env
