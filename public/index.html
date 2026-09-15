@@ -185,7 +185,18 @@ let id = null;
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 /* Split hosting: empty = same-origin; set to https://your-backend for Pages/Vercel frontend + VPS backend. */
-function apiBase() { try { return (localStorage.getItem("jpexs.apiBase") || "").replace(/\/+$/, ""); } catch { return ""; } }
+/* Split hosting: explicit choice in localStorage wins ("" = same-origin).
+   No choice stored: same-origin on localhost, Oracle backend everywhere else. */
+const DEFAULT_API = "https://jpexsweb.duckdns.org";
+function apiBase() {
+  try {
+    const v = localStorage.getItem("jpexs.apiBase");
+    if (v !== null) return v.replace(/\/+$/, "");
+  } catch {}
+  const h = location.hostname;
+  if (h === "localhost" || h === "127.0.0.1" || h === "") return "";
+  return DEFAULT_API;
+}
 function api(p) { return apiBase() + p; }
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block";
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 3200); }
