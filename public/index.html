@@ -342,6 +342,7 @@ function openPaint(url, target, name) {
   edTarget = target; edName = name || `${target}.png`;
   $("#edTitle").textContent = `🎨 ${edName} → id ${target} (bounded box = exact pixels)`;
   const img = new Image();
+  img.crossOrigin = "anonymous"; // split hosting: backend is cross-origin; without this the canvas taints and paint tools die silently
   img.onload = () => {
     ed.width = img.naturalWidth; ed.height = img.naturalHeight;
     ectx.globalCompositeOperation = "source-over"; ectx.globalAlpha = 1;
