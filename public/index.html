@@ -366,7 +366,7 @@ function openPaint(url, target, name) {
     } catch { edTemplate = edOriginal = null; }
     smudgeCol = null; lastClient = null;
     ed.style.cursor = "none";
-    setZoom(0.25); // default view: 25% (Fit button still available)
+    setZoom(1); // default view: 100%
     $("#edStage").scrollLeft = 0; $("#edStage").scrollTop = 0;
     $("#edWrap").style.display = "block"; buildSwatches();
   };
