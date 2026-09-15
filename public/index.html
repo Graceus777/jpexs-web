@@ -366,7 +366,9 @@ function openPaint(url, target, name) {
     } catch { edTemplate = edOriginal = null; }
     smudgeCol = null; lastClient = null;
     ed.style.cursor = "none";
-    fitCanvas(); $("#edWrap").style.display = "block"; buildSwatches();
+    setZoom(0.25); // default view: 25% (Fit button still available)
+    $("#edStage").scrollLeft = 0; $("#edStage").scrollTop = 0;
+    $("#edWrap").style.display = "block"; buildSwatches();
   };
   img.onerror = () => toast("could not load image for editing");
   img.src = url;
