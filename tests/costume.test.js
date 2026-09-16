@@ -33,6 +33,7 @@ async function fakePrepare(args) {
 
 async function fakeFfdec(args) {
   if (args[0] === "-importImages") fs.writeFileSync(args[2], SWF);
+  else if (args[0] === "-replace") fs.copyFileSync(args[1], args[2]);
   else if (args[0] === "-export") {
     fs.mkdirSync(path.join(args[2], "images"), { recursive: true });
     fs.writeFileSync(path.join(args[2], "images", "36.png"), PNG);
@@ -40,7 +41,7 @@ async function fakeFfdec(args) {
   return { stdout: "", stderr: "" };
 }
 
-async function fixture(t, { prepare = fakePrepare, runFfdec = fakeFfdec } = {}) {
+async function fixture(t, { prepare = fakePrepare, runFfdec = fakeFfdec, now } = {}) {
   assert.ok(fs.statSync(TEMP).isDirectory());
   const tempDir = fs.mkdtempSync(path.join(TEMP, "costume-test-"));
   const workDir = path.join(tempDir, "work");
@@ -78,7 +79,7 @@ async function fixture(t, { prepare = fakePrepare, runFfdec = fakeFfdec } = {}) 
       if (name === "./costume") return {
         installCostume(target, dependencies) {
           installations++;
-          installCostume(target, { ...dependencies, prepare: prepared, runFfdec: runner });
+          installCostume(target, { ...dependencies, prepare: prepared, runFfdec: runner, ...(now ? { now } : {}) });
         },
       };
       if (name === "child_process") return {
@@ -121,9 +122,29 @@ function form({ image = PNG, mask = PNG, modtype = "TOP", overfitPx = "4", extra
   return body;
 }
 
-async function post(h, body = form()) {
+async function submit(h, body = form()) {
   const response = await h.request("/api/costume", { method: "POST", body });
   return { status: response.status, headers: response.headers, body: await response.json() };
+}
+
+async function waitFor(h, jobId, timeoutMs = 180000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const response = await h.request(`/api/costume/jobs/${jobId}`);
+    assert.equal(response.status, 200, `job poll: ${response.status}`);
+    const job = await response.json();
+    if (job.status === "done" || job.status === "error") return job;
+    assert.ok(["queued", "processing"].includes(job.status), JSON.stringify(job));
+    assert.ok(Date.now() < deadline, "timed out waiting for job");
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+async function submitAndWait(h, body = form()) {
+  const enqueued = await submit(h, body);
+  assert.equal(enqueued.status, 202, JSON.stringify(enqueued.body));
+  assert.match(enqueued.body.jobId, /^[A-Za-z0-9_-]{4,64}$/);
+  return waitFor(h, enqueued.body.jobId);
 }
 
 function assertClean(h, ids = []) {
@@ -133,8 +154,8 @@ function assertClean(h, ids = []) {
 }
 
 async function assertCreated(h, result, regions = ["chestTop"]) {
-  assert.equal(result.status, 201, JSON.stringify(result.body));
-  const data = result.body;
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const data = result.result;
   assert.match(data.id, /^[A-Za-z0-9_-]{4,64}$/);
   assert.deepEqual(data.regions, regions);
   assert.equal(data.types, "image");
@@ -164,14 +185,14 @@ async function assertCreated(h, result, regions = ["chestTop"]) {
 
 test("frontend four-part upload creates a downloadable costume", async t => {
   const h = await fixture(t);
-  const data = await assertCreated(h, await post(h));
+  const data = await assertCreated(h, await submitAndWait(h));
   assertClean(h, [data.id]);
 });
 
 test("three-part upload with default overfit succeeds", async t => {
   const h = await fixture(t);
   const body = form({ overfitPx: null });
-  const data = await assertCreated(h, await post(h, body));
+  const data = await assertCreated(h, await submitAndWait(h, body));
   assert.equal(option(h.prepareCalls[0], "--overfit-px"), "4");
   assertClean(h, [data.id]);
 });
@@ -192,14 +213,14 @@ test("missing fields, bad modtype, and invalid overfit never reach prepare", asy
     ["JSON instead of multipart", () => JSON.stringify({ modtype: "TOP", overfitPx: 4 })],
   ];
   for (const [name, body] of cases) await t.test(name, async () => {
-    const result = await post(h, body());
+    const result = await submit(h, body());
     assert.equal(result.status, 400);
     assert.equal(typeof result.body.error, "string");
     assert.equal(h.prepareCalls.length, 0);
     assert.equal(h.calls.length, 0);
     assertClean(h);
   });
-  const data = await assertCreated(h, await post(h, form({ overfitPx: null })));
+  const data = await assertCreated(h, await submitAndWait(h, form({ overfitPx: null })));
   assertClean(h, [data.id]);
 });
 
@@ -216,14 +237,14 @@ test("multipart rejects files over 20 MB and surplus fields with cleanup", async
     ["duplicate modtype", () => form({ overfitPx: null, extra: [["modtype", "BOTTOMS"]] }), 400],
   ];
   for (const [name, body, status] of cases) await t.test(name, async () => {
-    const result = await post(h, body());
+    const result = await submit(h, body());
     assert.equal(result.status, status, JSON.stringify(result.body));
     assert.match(result.body.error, /Upload one image/);
     assert.equal(h.prepareCalls.length, 0);
     assert.equal(h.calls.length, 0);
     assertClean(h);
   });
-  const data = await assertCreated(h, await post(h, form({ overfitPx: null })));
+  const data = await assertCreated(h, await submitAndWait(h, form({ overfitPx: null })));
   assertClean(h, [data.id]);
 });
 
@@ -237,14 +258,15 @@ test("fake prepare errors remove partial work and release busy", async t => {
         return result;
       },
     });
-    const failed = await post(h, form({ overfitPx: null }));
-    assert.equal(failed.status, validation ? 422 : 500);
-    assert.doesNotMatch(failed.body.error, /private/);
+    const failed = await submitAndWait(h, form({ overfitPx: null }));
+    assert.equal(failed.status, "error");
+    assert.equal(failed.error.code, validation ? 422 : 500);
+    assert.doesNotMatch(failed.error.message, /private/);
     assert.equal(h.prepareCalls.length, 1);
     assert.equal(h.calls.length, 0);
     assertClean(h);
     fail = false;
-    const data = await assertCreated(h, await post(h, form({ overfitPx: null })));
+    const data = await assertCreated(h, await submitAndWait(h, form({ overfitPx: null })));
     assertClean(h, [data.id]);
   });
 });
@@ -265,13 +287,14 @@ test("FFDec import failures and invalid output remove all partial work", async t
         return fakeFfdec(args);
       },
     });
-    const failed = await post(h, form({ overfitPx: null }));
-    assert.equal(failed.status, 500);
-    assert.doesNotMatch(failed.body.error, /private/);
+    const failed = await submitAndWait(h, form({ overfitPx: null }));
+    assert.equal(failed.status, "error");
+    assert.equal(failed.error.code, 500);
+    assert.doesNotMatch(failed.error.message, /private/);
     assert.equal(h.calls.length, 1);
     assertClean(h);
     fail = false;
-    const data = await assertCreated(h, await post(h, form({ overfitPx: null })));
+    const data = await assertCreated(h, await submitAndWait(h, form({ overfitPx: null })));
     assertClean(h, [data.id]);
   });
 });
@@ -284,9 +307,9 @@ test("export failure preserves downloadable original/current and allows retry", 
       return fakeFfdec(args);
     },
   });
-  const result = await post(h, form({ overfitPx: null }));
-  assert.equal(result.status, 201);
-  const data = result.body;
+  const result = await submitAndWait(h, form({ overfitPx: null }));
+  assert.equal(result.status, "done");
+  const data = result.result;
   assert.equal(data.types, "image");
   assert.deepEqual(data.regions, ["chestTop"]);
   assert.equal(data.count, 0);
@@ -306,7 +329,7 @@ test("export failure preserves downloadable original/current and allows retry", 
   const exported = await response.json();
   assert.equal(exported.count, 1);
   assert.deepEqual(exported.files, [{ path: "images/36.png", bytes: PNG.length }]);
-  const next = await assertCreated(h, await post(h, form({ overfitPx: null })));
+  const next = await assertCreated(h, await submitAndWait(h, form({ overfitPx: null })));
   assert.notEqual(next.id, data.id);
   assertClean(h, [data.id, next.id]);
 });
@@ -317,54 +340,69 @@ function deferred() {
   return { promise, resolve };
 }
 
-test("busy 503 serializes prepare, import, and export and releases on completion", { timeout: 30000 }, async t => {
-  for (const phase of ["prepare", "import", "export"]) {
-    for (const fail of [false, true]) await t.test(`${phase} ${fail ? "failure" : "success"}`, async t => {
-      const entered = deferred();
-      const release = deferred();
-      let blocked = true;
-      async function gate(currentPhase) {
-        if (!blocked || currentPhase !== phase) return;
+test("concurrent uploads queue with positions and run FIFO", { timeout: 30000 }, async t => {
+  const entered = deferred();
+  const release = deferred();
+  let blocked = true;
+  const h = await fixture(t, {
+    async prepare(args) {
+      if (blocked) {
         entered.resolve();
         await release.promise;
         blocked = false;
-        if (fail) throw new Error(`forced ${phase} failure`);
       }
-      const h = await fixture(t, {
-        async prepare(args) { await gate("prepare"); return fakePrepare(args); },
-        async runFfdec(args) {
-          await gate(args[0] === "-importImages" ? "import" : "export");
-          return fakeFfdec(args);
-        },
-      });
-      const first = post(h, form({ overfitPx: null }));
-      const timer = setTimeout(() => entered.resolve(), 5000);
-      try {
-        await entered.promise;
-        assert.equal(h.prepareCalls.length, 1);
-        const before = fs.readdirSync(path.join(h.workDir, "_tmp")).sort();
-        assert.equal(before.length, 2);
-        const busy = await post(h, form());
-        assert.equal(busy.status, 503);
-        assert.equal(busy.headers.get("retry-after"), "10");
-        assert.match(busy.body.error, /busy/i);
-        assert.equal(h.prepareCalls.length, 1);
-        assert.deepEqual(fs.readdirSync(path.join(h.workDir, "_tmp")).sort(), before);
-      } finally {
-        clearTimeout(timer);
-        release.resolve();
-        await first;
-      }
-      const result = await first;
-      assert.equal(result.status, fail && phase !== "export" ? 500 : 201);
-      const ids = result.status === 201 ? [result.body.id] : [];
-      assertClean(h, ids);
-      const next = await assertCreated(h, await post(h, form({ overfitPx: null })));
-      assertClean(h, [...ids, next.id]);
-    });
-  }
+      return fakePrepare(args);
+    },
+  });
+  const first = await submit(h, form({ overfitPx: null }));
+  assert.equal(first.status, 202);
+  assert.match(first.body.jobId, /^[A-Za-z0-9_-]{4,64}$/);
+  await entered.promise;
+  const second = await submit(h, form({ overfitPx: null }));
+  assert.equal(second.status, 202);
+  const waiting = await h.request(`/api/costume/jobs/${second.body.jobId}`).then(r => r.json());
+  assert.equal(waiting.status, "queued");
+  assert.equal(waiting.position, 2);
+  assert.equal(waiting.queue.pending, 1);
+  assert.equal(waiting.queue.active, 1);
+  const stats = await h.request("/api/costume/queue").then(r => r.json());
+  assert.equal(stats.pending, 1);
+  assert.equal(stats.active, 1);
+  release.resolve();
+  const doneA = await waitFor(h, first.body.jobId);
+  const doneB = await waitFor(h, second.body.jobId);
+  assert.equal(doneA.status, "done");
+  assert.equal(doneB.status, "done");
+  assert.ok(doneA.finishedAt <= doneB.startedAt);
+  const after = await h.request("/api/costume/queue").then(r => r.json());
+  assert.equal(after.pending, 0);
+  assert.equal(after.active, 0);
+  assert.ok(after.completedLast5Min >= 2);
+  assertClean(h, [doneA.result.id, doneB.result.id]);
 });
 
+test("unknown and malformed job ids", async t => {
+  const h = await fixture(t);
+  const bad = await h.request("/api/costume/jobs/!!!");
+  assert.equal(bad.status, 400);
+  const missing = await h.request(`/api/costume/jobs/${"0".repeat(36)}`);
+  assert.equal(missing.status, 404);
+  assert.match((await missing.json()).error, /24 hours/);
+  assertClean(h);
+});
+
+test("terminal jobs expire after 24 hours", async t => {
+  let clock = 1_000_000;
+  const h = await fixture(t, { now: () => clock });
+  const done = await submitAndWait(h, form({ overfitPx: null }));
+  assert.equal(done.status, "done");
+  clock += 25 * 60 * 60 * 1000;
+  const stats = await h.request("/api/costume/queue").then(r => r.json());
+  assert.equal(stats.retained24h, 0);
+  const gone = await h.request(`/api/costume/jobs/${done.jobId}`);
+  assert.equal(gone.status, 404);
+  assertClean(h, [done.result.id]);
+});
 async function python(code, args = []) {
   return execute(PYTHON, ["-B", "-c", code, ...args], {
     timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
@@ -427,7 +465,7 @@ test("real prepareCostume and FFDec TOP/BOTTOMS export, replacement, and downloa
       "mask.save(root / 'mask.png')",
       "Image.new('RGBA', (274, 561) if top else (776, 147), (12, 220, 90, 255)).save(root / 'replacement.png')",
     ].join("\n"), [fixtures, modtype]);
-    const result = await post(h, form({
+    const result = await submitAndWait(h, form({
       image: fs.readFileSync(path.join(fixtures, "source.png")),
       mask: fs.readFileSync(path.join(fixtures, "mask.png")),
       modtype, overfitPx: null,
@@ -495,4 +533,43 @@ test("real prepareCostume and FFDec TOP/BOTTOMS export, replacement, and downloa
     }
     assertClean(h, [data.id]);
   });
+});
+
+test("preview-hidden blanks assets in a temp copy without touching current.swf", async t => {
+  const h = await fixture(t);
+  const upload = new FormData();
+  upload.append("swf", new Blob([Buffer.from("FWSfake")]), "mod.swf");
+  const up = await h.request("/api/swf", { method: "POST", body: upload });
+  assert.equal(up.status, 200);
+  const { id } = await up.json();
+  for (const [payload, status] of [
+    [JSON.stringify({ blanks: [] }), 400],
+    [JSON.stringify({ blanks: "4" }), 400],
+    [JSON.stringify({ blanks: ["abc"] }), 400],
+    [JSON.stringify({ blanks: Array.from({ length: 21 }, (_, i) => String(i + 1)) }), 400],
+    [JSON.stringify({}), 400],
+  ]) await t.test(`rejects with ${status}`, async () => {
+    const response = await h.request(`/api/swf/${id}/preview-hidden`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: payload,
+    });
+    assert.equal(response.status, status);
+  });
+  const missing = await h.request(`/api/swf/${"0".repeat(36)}/preview-hidden`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blanks: ["4"] }),
+  });
+  assert.equal(missing.status, 404);
+  const ok = await h.request(`/api/swf/${id}/preview-hidden`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blanks: ["4"] }),
+  });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(Buffer.from(await ok.arrayBuffer()), Buffer.from("FWSfake"));
+  assert.equal(h.calls[0][0], "-replace");
+  assert.equal(h.calls[0][1], path.join(h.workDir, id, "current.swf"));
+  assert.equal(h.calls[0][3], "4");
+  assert.deepEqual(fs.readFileSync(path.join(h.workDir, id, "current.swf")), Buffer.from("FWSfake"));
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (fs.readdirSync(path.join(h.workDir, "_tmp")).length === 0) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assertClean(h, [id]);
 });

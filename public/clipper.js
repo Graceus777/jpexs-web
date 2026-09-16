@@ -154,20 +154,50 @@
     const overfit = Number($("#clipOverfit").value), modtype = $("#clipModtype").value;
     if (!$("#clipOverfit").value.trim() || !Number.isInteger(overfit) || overfit < 0 || overfit > 20) return status("Overfit must be an integer from 0 to 20.");
     if (!["TOP", "BOTTOMS"].includes(modtype)) return status("Choose TOP or BOTTOMS.");
-    if (!beginJob("Uploading image and selection; compiling SWF...")) return;
+    if (!beginJob("Uploading image and selection...")) return;
+    let jobId = null;
     try {
-      resetJob(); status("Processing on backend; please wait...");
       const fd = new FormData(); fd.append("image", file, file.name);
       fd.append("mask", await maskBlob(), "selection.png");
       fd.append("modtype", modtype); fd.append("overfitPx", String(overfit));
-      const r = await requestJson(api("/api/costume"), { method: "POST", body: fd });
-      if (typeof r.id !== "string" || !/^[A-Za-z0-9_-]{4,64}$/.test(r.id)) throw new Error(r.error || "Conversion returned no valid SWF id.");
-      id = r.id; $("#swfId").textContent = id; syncDl(); $("#types").value = "image";
-      const regions = Array.isArray(r.regions) ? r.regions.join(", ") : String(r.regions || "none reported");
-      status(`SWF ready: ${(Number(r.bytes || 0) / 1024).toFixed(1)} KB. Regions: ${regions}. ${r.exportError ? "Asset export failed; download the SWF or retry Images export below." : "Edit the image cards below, then download current.swf."}`);
-      renderExports(r, "image");
-    } catch (e) { status(`${id ? "SWF is downloadable, but displaying exports failed" : "Process failed"}: ${e.message}`); }
-    finally { endJob(); }
+      const queued = await requestJson(api("/api/costume"), { method: "POST", body: fd });
+      if (typeof queued.jobId !== "string") throw new Error(queued.error || "Conversion did not return a job.");
+      jobId = queued.jobId;
+    } catch (e) { endJob(); return status(`Process failed: ${e.message}`); }
+    endJob();
+    const session = jobSession;
+    let failures = 0;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      if (session !== jobSession) return;
+      let job = null;
+      try {
+        job = await requestJson(api(`/api/costume/jobs/${encodeURIComponent(jobId)}`));
+        failures = 0;
+      } catch (e) {
+        if (++failures > 10 || session !== jobSession) {
+          if (session === jobSession) status(`Lost track of queued job: ${e.message}`);
+          return;
+        }
+        continue;
+      }
+      if (session !== jobSession) return;
+      if (job.status === "done") {
+        const r = job.result || {};
+        if (typeof r.id !== "string" || !/^[A-Za-z0-9_-]{4,64}$/.test(r.id)) return status("Conversion finished with an invalid result.");
+        resetJob();
+        id = r.id; $("#swfId").textContent = id; syncDl(); $("#types").value = "image";
+        const regions = Array.isArray(r.regions) ? r.regions.join(", ") : String(r.regions || "none reported");
+        status(`SWF ready: ${(Number(r.bytes || 0) / 1024).toFixed(1)} KB. Regions: ${regions}. ${r.exportError ? "Asset export failed; download the SWF or retry Images export below." : "Edit the image cards below, then download current.swf."}`);
+        renderExports(r, "image");
+        return;
+      }
+      if (job.status === "error") return status(`Process failed: ${(job.error && job.error.message) || "unknown error"}`);
+      if (job.status === "queued") {
+        const q = job.queue || {};
+        status(`Queued — #${job.position || 1} in line (${q.pending || 0} waiting, ${q.completedLast5Min || 0} done in last 5 min). This continues in the background; starting another upload stops tracking it here.`);
+      } else status("Compiling SWF on backend; please wait...");
+    }
   };
   controls();
 })();

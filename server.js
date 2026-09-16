@@ -231,6 +231,53 @@ app.post("/api/swf/:id/replace", upload.single("file"), async (req, res) => {
   }
 });
 
+// 1x1 transparent PNG used to blank assets (delete + filtered preview).
+const BLANK_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64"
+);
+
+// Preview-only copy with selected image characters blanked. current.swf untouched.
+app.post("/api/swf/:id/preview-hidden", async (req, res) => {
+  const id = safeId(req.params.id);
+  if (!id) return res.status(400).json({ error: "bad id" });
+  const p = swfPaths(id);
+  if (!fs.existsSync(p.current))
+    return res.status(404).json({ error: "swf not found" });
+  const blanks = req.body.blanks;
+  if (
+    !Array.isArray(blanks) || !blanks.length || blanks.length > 20 ||
+    !blanks.every(t => /^\d{1,6}$/.test(String(t)))
+  ) {
+    return res.status(400).json({ error: "blanks must be a non-empty array of up to 20 numeric character IDs" });
+  }
+  const tmpBase = path.join(WORK_DIR, "_tmp", `preview-${id}-${Date.now().toString(36)}`);
+  const blankPng = tmpBase + "-blank.png";
+  let tmpSwf = p.current;
+  const cleanup = () => {
+    try { fs.unlinkSync(blankPng); } catch {}
+    if (tmpSwf !== p.current) {
+      try { fs.unlinkSync(tmpSwf); } catch {}
+    }
+  };
+  try {
+    fs.writeFileSync(blankPng, BLANK_PNG);
+    let step = 0;
+    for (const target of blanks.map(String)) {
+      const out = `${tmpBase}-${step++}.swf`;
+      await runFfdec(["-replace", tmpSwf, out, target, blankPng]);
+      if (tmpSwf !== p.current) {
+        try { fs.unlinkSync(tmpSwf); } catch {}
+      }
+      tmpSwf = out;
+    }
+    res.sendFile(path.resolve(tmpSwf), cleanup);
+  } catch (e) {
+    cleanup();
+    res.status(500).json({ error: String((e && e.message) || e).slice(0, 300) });
+  }
+});
+
 // Download current working SWF
 app.get("/api/swf/:id/download", (req, res) => {
   const id = safeId(req.params.id);

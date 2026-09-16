@@ -116,6 +116,7 @@
     <button id="btnLocalInspect">🔍 Inspect locally</button>
     <button id="btnPreviewLocal">▶ Preview original</button>
     <button id="btnPreviewPatched">▶ Preview patched</button>
+    <button id="btnPreviewFiltered" title="Preview with 🚫-hidden assets blanked (mod file untouched)">▶ Preview (hidden off)</button>
   </div>
   <div id="ruffleBox"></div>
   <div class="muted">Preview runs Ruffle from CDN (<code>unpkg.com/@ruffle-rs/ruffle</code>); offline it degrades to inspect-only. Writes still go through FFDec until the WASM build lands (see <code>wasm/</code>).</div>
@@ -277,7 +278,7 @@ for (const type of ["click", "change", "input", "pointerdown", "drop", "keydown"
   }, true);
 }
 function resetJob() {
-  jobSession++; editorSession++; id = null;
+  jobSession++; editorSession++; id = null; hiddenTargets.clear();
   $("#swfId").textContent = "—";
   $("#files").replaceChildren(); $("#expInfo").textContent = "";
   $("#repOut").textContent = "No swaps yet.";
@@ -326,6 +327,8 @@ $("#up").onclick = async () => {
 $$(".preset").forEach(b => b.onclick = () => { $("#types").value = b.dataset.t; $("#exp").click(); });
 
 const IMG = /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i, AUD = /\.(mp3|wav|flv)$/i, AS = /\.as$/i;
+const BLANK_PNG = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="), c => c.charCodeAt(0));
+const hiddenTargets = new Set();
 function parseTarget(rel) {
   const parts = rel.split("/"), base = parts[parts.length - 1];
   let m = base.match(/^(\d+)\.[a-z0-9]+$/i);
@@ -391,6 +394,18 @@ function renderExports(r, types) {
         edit.dataset.act = k === "img" ? "paint" : "code";
         edit.onclick = () => { if (active()) (k === "img" ? openPaint : openCode)(url, target, base); };
         row.appendChild(edit);
+      }
+      if (k === "img" && /^\d+$/.test(target)) {
+        const del = document.createElement("button"); del.textContent = "🗑 delete";
+        del.title = "Replace this asset with a blank image in current.swf";
+        del.onclick = () => { if (active()) doReplace(target, new File([BLANK_PNG], `${target}-blank.png`, { type: "image/png" }), ""); };
+        row.appendChild(del);
+        const hide = document.createElement("button");
+        const syncHide = () => hide.textContent = hiddenTargets.has(target) ? "👁 unhide" : "🚫 hide";
+        syncHide();
+        hide.title = "Hide this asset in filtered preview only (mod file untouched)";
+        hide.onclick = () => { if (!active()) return; hiddenTargets.has(target) ? hiddenTargets.delete(target) : hiddenTargets.add(target); syncHide(); };
+        row.appendChild(hide);
       }
       const label = document.createElement("label"); label.className = "btn"; label.textContent = "Replace";
       const input = document.createElement("input"); input.type = "file"; input.hidden = true; input.dataset.act = "file";
@@ -805,6 +820,19 @@ addEventListener("keyup", e => { if (e.code === "Space") spaceDown = false; });
       toast("previewing patched current.swf ✓");
     } catch (e) { toast("patched preview failed (server up?): " + e.message); }
   };
+  const btnFilt = $("#btnPreviewFiltered");
+  if (btnFilt) btnFilt.onclick = async () => {
+    if (!id) return toast("no SWF yet — Upload or Process first");
+    if (!hiddenTargets.size) return toast("nothing hidden — use 🚫 hide on an image card first");
+    try {
+      const buf = await fetch(api(`/api/swf/${id}/preview-hidden`), { method: "POST",
+        headers: {"Content-Type":"application/json"}, body: JSON.stringify({ blanks: [...hiddenTargets] }) })
+        .then(async r => { if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`); return r.arrayBuffer(); });
+      if (!hasClient) return;
+      await SWFClient.previewBytes("#ruffleBox", new Uint8Array(buf));
+      toast(`previewing without ${hiddenTargets.size} hidden asset(s) ✓ (mod untouched)`);
+    } catch (e) { toast("filtered preview failed: " + e.message); }
+  };
   // Tags button: local-first, server dump appended when reachable (static-safe).
   const tagsBtn = $("#tags");
   if (tagsBtn) tagsBtn.onclick = async () => {
@@ -828,7 +856,7 @@ addEventListener("keyup", e => { if (e.code === "Space") spaceDown = false; });
     if (hasClient && typeof SWFClient.ensureWasm === "function") SWFClient.ensureWasm();
   } catch { /* never break startup for an optional engine */ }
 })();
-for (const selector of ["#btnLocalInspect", "#btnPreviewLocal", "#btnPreviewPatched", "#tags", "#health"]) {
+for (const selector of ["#btnLocalInspect", "#btnPreviewLocal", "#btnPreviewPatched", "#btnPreviewFiltered", "#tags", "#health"]) {
   const button = $(selector), handler = button.onclick;
   button.onclick = async () => {
     if (!beginJob("Loading inspection or preview...")) return;
