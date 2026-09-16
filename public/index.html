@@ -142,7 +142,7 @@
   <p><a id="dlFlash" href="#">⬇ download current.swf</a> (re-export after swapping to verify)</p>
   <details class="manual">
     <summary>Manual swap (advanced — type target + file by hand)</summary>
-    <p>Images/sounds: target = characterId (the number on the card). Scripts: target = dotted name (e.g. <code>com.example.MyClass</code>).</p>
+    <p>Images/sounds: target = characterId (the number on the card). Scripts: target = dotted name (e.g. <code>com.example.MyClass</code>). Use bitmap IDs from an Images export — sprite or shape IDs report success but change nothing visible.</p>
     <label>target <input id="mTarget" size="26" /></label>
     <label>format <input id="mFmt" placeholder="optional: lossless / jpeg3" size="20" /></label>
     <input type="file" id="mFile" />
@@ -331,6 +331,8 @@ const BLANK_PNG = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf
 const hiddenTargets = new Set();
 function parseTarget(rel) {
   const parts = rel.split("/"), base = parts[parts.length - 1];
+  const sprite = parts.length > 1 && parts[0].match(/^DefineSprite_(\d+)/i);
+  if (sprite) return { target: sprite[1], kind: "sprite" }; // rendered frame, not a swappable character
   let m = base.match(/^(\d+)\.[a-z0-9]+$/i);
   if (m) return { target: m[1], kind: AS.test(base) ? "script" : "id" };
   m = base.match(/(\d+)\.[a-z0-9]+$/i);           // e.g. DefineBits_12.png
@@ -340,6 +342,14 @@ function parseTarget(rel) {
     return { target: p, kind: "script" };
   }
   return { target: base, kind: "id" };
+}
+// Only flat numeric raster bitmaps / sounds are swappable characters.
+// Sprite frames (DefineSprite_N/1.png) and shape SVGs resolve to unrelated
+// IDs that FFDec accepts but silently leaves unchanged.
+function isEditableTarget(path, target, kind, k) {
+  if (kind === "script") return true;
+  if (!/^\d+$/.test(target) || path.includes("/")) return false;
+  return k === "snd" || (k === "img" && /\.(png|jpe?g)$/i.test(path));
 }
 function kindOf(path) { if (IMG.test(path)) return "img"; if (AUD.test(path)) return "snd"; if (AS.test(path)) return "as"; return "other"; }
 
@@ -372,11 +382,11 @@ function renderExports(r, types) {
     const base = f.path.split("/").pop();
     const { target, kind } = parseTarget(f.path);
     const k = kindOf(f.path);
-    const editable = kind === "script" || ((k === "img" || k === "snd") && /^\d+$/.test(target) && !/^sprites?\//i.test(f.path));
+    const editable = isEditableTarget(f.path, target, kind, k);
     const d = document.createElement("div"); d.className = "f";
     d.dataset.target = target; d.dataset.kind = kind;
     const badge = document.createElement("span"); badge.className = "badge";
-    badge.textContent = `${kind === "script" ? "script" : "id"} ${target}`; d.appendChild(badge);
+    badge.textContent = `${kind === "script" ? "script" : kind === "sprite" ? "sprite" : "id"} ${target}`; d.appendChild(badge);
     if (k === "img" || k === "snd") {
       const preview = document.createElement(k === "img" ? "img" : "audio");
       if (k === "img") { preview.loading = "lazy"; preview.alt = `Bitmap ${target}`; }
@@ -395,7 +405,7 @@ function renderExports(r, types) {
         edit.onclick = () => { if (active()) (k === "img" ? openPaint : openCode)(url, target, base); };
         row.appendChild(edit);
       }
-      if (k === "img" && /^\d+$/.test(target)) {
+      if (editable && k === "img") {
         const del = document.createElement("button"); del.textContent = "🗑 delete";
         del.title = "Replace this asset with a blank image in current.swf";
         del.onclick = () => { if (active()) doReplace(target, new File([BLANK_PNG], `${target}-blank.png`, { type: "image/png" }), ""); };
