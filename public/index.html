@@ -63,11 +63,43 @@
   #ruffleBox:empty::after { content: "preview appears here — pick Preview original / Preview patched"; color: #888; font-size: 12px; display: block; padding: 22px; }
   #localInfo { font-size: 13px; color: #333; margin: 6px 0; }
   .muted { color: #777; font-size: 12px; }
+  button:disabled, input:disabled, select:disabled { opacity: .5; cursor: not-allowed; }
+  a[aria-disabled="true"] { opacity: .5; pointer-events: none; }
+  .clipTools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+  #clipCanvas { display: block; width: 100%; max-width: 512px; height: auto; touch-action: none; cursor: crosshair; background: repeating-conic-gradient(#ddd 0 25%, #fff 0 50%) 0 0 / 16px 16px; }
+  #clipStatus, #jobStatus { overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
-<h1>jpexs-web <small style="font-weight:normal">offline FFDec client (v0.4 paint)</small></h1>
-<p>Upload a <code>.swf</code> → export → <b>one-click ⬇ download, edit in GIMP, drag &amp; drop back onto the same card</b> — or quick-edit in the built-in paint / code box. Nothing leaves your PC. New: <b>local inspect + Ruffle preview</b> below work with no server.</p>
+<h1>jpexs-web <small style="font-weight:normal">FFDec client</small></h1>
+<p>Upload a SWF or compile a templated clothing image, edit exported image cards, then download the current SWF. Local inspection uses browser-held bytes. Upload, Process, export and swap send files or requests to the selected backend, which stores job files; they are not browser-only operations.</p>
+<div id="jobStatus" role="status" aria-live="polite"></div>
+
+<div class="card" id="clipCard">
+  <h3>1a. Image to clothing SWF</h3>
+  <p>Use an image already aligned to the costume template: the full image is resized to 1024 x 1280, not cropped or fitted. This is not automatic clothing detection or background removal. Select only the clothing; original image transparency is preserved by the server.</p>
+  <label>Templated image <input type="file" id="clipImage" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" /></label>
+  <div class="muted">PNG, JPEG or WebP; up to 20 MB, 4096 pixels per side and 16 megapixels. Cyan marks selected pixels.</div>
+  <div class="clipTools">
+    <label>Selection tool <select id="clipTool">
+      <option value="rect-add">Rectangle add</option>
+      <option value="rect-erase">Rectangle subtract</option>
+      <option value="brush-add">Brush add</option>
+      <option value="brush-erase">Brush erase</option>
+    </select></label>
+    <label>Brush diameter <input id="clipSize" type="range" min="1" max="160" value="32" /> <output id="clipSizeLabel">32 px</output></label>
+    <button id="clipUndo" disabled>Undo</button>
+    <button id="clipClear" disabled>Clear</button>
+    <button id="clipAll" disabled>Select all</button>
+  </div>
+  <canvas id="clipCanvas" width="1024" height="1280" hidden aria-label="Clothing selection: drag to select or erase on the template" style="display:none"></canvas>
+  <div class="clipTools">
+    <label>Clothing <select id="clipModtype"><option value="TOP">TOP</option><option value="BOTTOMS">BOTTOMS</option></select></label>
+    <label>Overfit (px per side) <input id="clipOverfit" type="number" min="0" max="20" step="1" value="4" style="width:64px" /></label>
+    <button id="clipProcess" class="primary" disabled>Process / compile SWF</button>
+  </div>
+  <div id="clipStatus" role="status" aria-live="polite">Choose a templated image, drag over clothing, then Process. Exported image cards below edit the bitmap character IDs used by the existing sprites.</div>
+</div>
 
 <div class="card">
   <h3>1. Upload SWF</h3>
@@ -97,7 +129,7 @@
   <button class="preset" data-t="script">Scripts</button>
   <button class="preset" data-t="sprite,image,sound,script">All four</button>
   <br/><br/>
-  <label>types <input id="types" value="sprite" size="32" /></label>
+  <label>types <input id="types" value="image" size="32" /></label>
   <button id="exp" class="primary">Export</button>
   <div id="expInfo"></div>
   <div id="files"></div>
@@ -208,7 +240,64 @@ function apiBase() {
 function api(p) { return apiBase() + p; }
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block";
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 3200); }
-function syncDl() { const h = api(`/api/swf/${id}/download`); $("#dl").href = h; $("#dlFlash").href = h; }
+let jobBusy = false, jobSession = 0, editorSession = 0;
+let lockedControls = [];
+function syncDl() {
+  for (const a of [$("#dl"), $("#dlFlash")]) {
+    a.setAttribute("aria-disabled", String(!id || jobBusy));
+    if (id && !jobBusy) a.href = api(`/api/swf/${id}/download`);
+    else a.removeAttribute("href");
+  }
+}
+function beginJob(message) {
+  if (jobBusy) { toast("Busy: wait for the current operation."); return false; }
+  jobBusy = true;
+  document.dispatchEvent(new Event("jobbusy"));
+  lockedControls = $$("button, input, select, textarea").map(el => [el, el.disabled]);
+  lockedControls.forEach(([el]) => el.disabled = true);
+  $("#jobStatus").textContent = message;
+  document.body.setAttribute("aria-busy", "true");
+  syncDl();
+  return true;
+}
+function endJob() {
+  jobBusy = false;
+  lockedControls.forEach(([el, disabled]) => el.disabled = disabled);
+  lockedControls = [];
+  document.body.removeAttribute("aria-busy");
+  $("#jobStatus").textContent = "";
+  syncDl();
+  document.dispatchEvent(new Event("jobidle"));
+}
+for (const type of ["click", "change", "input", "pointerdown", "drop", "keydown"]) {
+  document.addEventListener(type, e => {
+    if (!jobBusy) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (type === "click" || type === "drop") toast("Busy: wait for the current operation.");
+  }, true);
+}
+function resetJob() {
+  jobSession++; editorSession++; id = null;
+  $("#swfId").textContent = "—";
+  $("#files").replaceChildren(); $("#expInfo").textContent = "";
+  $("#repOut").textContent = "No swaps yet.";
+  $("#tagsOut").textContent = "—"; $("#ruffleBox").replaceChildren();
+  $("#edWrap").style.display = $("#asWrap").style.display = "none";
+  edTarget = asTarget = null; undoStack = []; discardMasks();
+  drawing = panning = false; ed.width = ed.height = 1; $("#asText").value = "";
+  if (window.SWFClient) { SWFClient.localBytes = null; SWFClient.localName = ""; }
+  $("#localInfo").textContent = "No local SWF selected. Generated SWFs can use Preview patched.";
+  syncDl();
+}
+async function requestJson(url, options) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let result;
+  try { result = JSON.parse(text); } catch {}
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${result?.error || text.slice(0, 300) || response.statusText}`);
+  if (!result || typeof result !== "object") throw new Error("Backend returned an invalid JSON response.");
+  return result;
+}
 function syncApiState() {
   const b = apiBase();
   $("#apiState").textContent = b ? "backend: " + b : "backend: same-origin";
@@ -220,10 +309,19 @@ function syncApiState() {
 /* ---------- upload / export ---------- */
 $("#up").onclick = async () => {
   const f = $("#swf").files[0]; if (!f) return alert("pick a .swf first");
-  const fd = new FormData(); fd.append("swf", f);
-  const r = await fetch(api("/api/swf"), { method: "POST", body: fd }).then(r => r.json());
-  if (r.id) { id = r.id; $("#swfId").textContent = id; syncDl(); toast("uploaded ✓ — hit Export"); }
-  else alert(JSON.stringify(r));
+  if (!beginJob("Uploading SWF to backend...")) return;
+  try {
+    resetJob(); document.dispatchEvent(new Event("swfselected"));
+    const fd = new FormData(); fd.append("swf", f);
+    const r = await requestJson(api("/api/swf"), { method: "POST", body: fd });
+    if (!r.id) throw new Error(r.error || "Upload returned no SWF id.");
+    id = r.id; $("#swfId").textContent = id; syncDl(); toast("Uploaded; select Export to edit assets.");
+    if (window.SWFClient) {
+      SWFClient.localBytes = new Uint8Array(await f.arrayBuffer()); SWFClient.localName = f.name;
+      $("#localInfo").textContent = `${f.name}: local inspect and original preview ready.`;
+    }
+  } catch (e) { $("#expInfo").textContent = e.message; toast(e.message); }
+  finally { endJob(); }
 };
 $$(".preset").forEach(b => b.onclick = () => { $("#types").value = b.dataset.t; $("#exp").click(); });
 
@@ -243,69 +341,97 @@ function parseTarget(rel) {
 function kindOf(path) { if (IMG.test(path)) return "img"; if (AUD.test(path)) return "snd"; if (AS.test(path)) return "as"; return "other"; }
 
 $("#exp").onclick = async () => {
-  if (!id) return alert("upload first");
+  if (!id) return alert("upload or compile first");
+  if (!beginJob("Exporting assets...")) return;
   const types = $("#types").value;
-  $("#expInfo").textContent = "exporting…";
-  const r = await fetch(api(`/api/swf/${id}/export`), { method: "POST",
-    headers: {"Content-Type":"application/json"}, body: JSON.stringify({ types }) }).then(r => r.json());
-  if (!r.files) { $("#expInfo").textContent = JSON.stringify(r).slice(0, 300); return; }
-  $("#expInfo").textContent = `${r.count} files (${r.types || types}) — ⬇ downloads as e.g. 5.png, then drop it back on its card after editing.`;
-  const box = $("#files"); box.innerHTML = "";
-  r.files.forEach(f => {
-    const url = api(`/api/swf/${id}/files/${f.path}`);
+  editorSession++;
+  $("#edWrap").style.display = $("#asWrap").style.display = "none";
+  $("#files").replaceChildren(); $("#expInfo").textContent = "Exporting...";
+  try {
+    const r = await requestJson(api(`/api/swf/${id}/export`), { method: "POST",
+      headers: {"Content-Type":"application/json"}, body: JSON.stringify({ types }) });
+    renderExports(r, types);
+  } catch (e) { $("#expInfo").textContent = `Export failed: ${e.message}. Current SWF is still downloadable.`; }
+  finally { endJob(); }
+};
+function renderExports(r, types) {
+  const box = $("#files"); box.replaceChildren();
+  const files = Array.isArray(r.files) ? r.files : [];
+  $("#expInfo").textContent = r.exportError
+    ? `SWF ready; asset export failed: ${typeof r.exportError === "string" ? r.exportError : JSON.stringify(r.exportError)}. Download is available; retry Export with Images.`
+    : `${files.length} files (${r.types || types}). Edit image bitmap IDs, not sprite IDs; sprite exports are not PNGs.`;
+  if (!Array.isArray(r.files) && !r.exportError) $("#expInfo").textContent = r.error || "No exported files returned. Retry Export with Images.";
+  const session = jobSession, swf = id;
+  const active = () => !jobBusy && session === jobSession && swf === id;
+  files.forEach(f => {
+    if (typeof f.path !== "string") return;
+    const url = api(`/api/swf/${encodeURIComponent(id)}/files/${f.path.split("/").map(encodeURIComponent).join("/")}`);
     const base = f.path.split("/").pop();
     const { target, kind } = parseTarget(f.path);
     const k = kindOf(f.path);
+    const editable = kind === "script" || ((k === "img" || k === "snd") && /^\d+$/.test(target) && !/^sprites?\//i.test(f.path));
     const d = document.createElement("div"); d.className = "f";
     d.dataset.target = target; d.dataset.kind = kind;
-    let prev = "";
-    if (k === "img") prev = `<img src="${url}" loading="lazy"/>`;
-    else if (k === "snd") prev = `<audio controls preload="none" src="${url}"></audio>`;
-    else if (k === "as") prev = `<div style="font-size:28px">📝</div>`;
-    const editBtn = k === "img" ? `<button data-act="paint">🎨 edit</button>`
-      : k === "as" ? `<button data-act="code">📝 edit</button>` : ``;
-    d.innerHTML = `<span class="badge">${kind === "script" ? "✎" : "id"} ${target}</span>${prev}
-      <div class="fname">${f.path}<br/>${(f.bytes/1024).toFixed(1)} KB</div>
-      <div class="row"><a class="btn" href="${url}" download="${base}">⬇</a>${editBtn}
-      <label class="btn">🔁<input type="file" hidden data-act="file"/></label></div>
-      <div class="dropHint">or drop a replacement file here</div>`;
-    // one-click file replace
-    d.querySelector('[data-act="file"]').onchange = e => {
-      if (e.target.files[0]) doReplace(target, e.target.files[0], "");
-      e.target.value = "";
-    };
-    const eb = d.querySelector('[data-act="paint"]');
-    if (eb) eb.onclick = () => openPaint(url, target, base);
-    const cb = d.querySelector('[data-act="code"]');
-    if (cb) cb.onclick = () => openCode(url, target, base);
-    // drag & drop swap
-    d.addEventListener("dragover", e => { e.preventDefault(); d.classList.add("drop"); });
-    d.addEventListener("dragleave", () => d.classList.remove("drop"));
-    d.addEventListener("drop", e => {
-      e.preventDefault(); d.classList.remove("drop");
-      const file = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (file) doReplace(target, file, "");
-    });
-    box.appendChild(d);
+    const badge = document.createElement("span"); badge.className = "badge";
+    badge.textContent = `${kind === "script" ? "script" : "id"} ${target}`; d.appendChild(badge);
+    if (k === "img" || k === "snd") {
+      const preview = document.createElement(k === "img" ? "img" : "audio");
+      if (k === "img") { preview.loading = "lazy"; preview.alt = `Bitmap ${target}`; }
+      else { preview.controls = true; preview.preload = "none"; }
+      preview.src = url; d.appendChild(preview);
+    }
+    const name = document.createElement("div"); name.className = "fname";
+    name.textContent = `${f.path} (${(Number(f.bytes || 0)/1024).toFixed(1)} KB)`; d.appendChild(name);
+    const row = document.createElement("div"); row.className = "row";
+    const download = document.createElement("a"); download.className = "btn";
+    download.href = url; download.download = base; download.textContent = "Download"; row.appendChild(download);
+    if (editable) {
+      if (k === "img" || k === "as") {
+        const edit = document.createElement("button"); edit.textContent = "Edit";
+        edit.dataset.act = k === "img" ? "paint" : "code";
+        edit.onclick = () => { if (active()) (k === "img" ? openPaint : openCode)(url, target, base); };
+        row.appendChild(edit);
+      }
+      const label = document.createElement("label"); label.className = "btn"; label.textContent = "Replace";
+      const input = document.createElement("input"); input.type = "file"; input.hidden = true; input.dataset.act = "file";
+      input.onchange = e => {
+        if (active() && e.target.files[0]) doReplace(target, e.target.files[0], "");
+        e.target.value = "";
+      };
+      label.appendChild(input); row.appendChild(label);
+      d.addEventListener("dragover", e => { e.preventDefault(); if (active()) d.classList.add("drop"); });
+      d.addEventListener("dragleave", () => d.classList.remove("drop"));
+      d.addEventListener("drop", e => {
+        e.preventDefault(); d.classList.remove("drop");
+        if (active() && e.dataTransfer.files[0]) doReplace(target, e.dataTransfer.files[0], "");
+      });
+    }
+    d.appendChild(row);
+    const hint = document.createElement("div"); hint.className = "dropHint";
+    hint.textContent = editable ? "Or drop a replacement file here" : "Download only; export Images to edit sprite bitmaps.";
+    d.appendChild(hint); box.appendChild(d);
   });
-};
+}
 
 /* ---------- replace ---------- */
 async function doReplace(target, file, format) {
-  if (!id) return alert("upload first");
+  if (!id) return alert("upload or compile first");
+  if (!file || !target) return toast("Choose a replacement file and target.");
+  if (!beginJob(`Swapping ${target}...`)) return;
   $("#repOut").textContent = `swapping ${target} …`;
   const fd = new FormData();
   fd.append("file", file, file.name || `${target}`);
   fd.append("target", target);
   if (format) fd.append("format", format);
   try {
-    const r = await fetch(api(`/api/swf/${id}/replace`), { method: "POST", body: fd }).then(r => r.json());
+    const r = await requestJson(api(`/api/swf/${id}/replace`), { method: "POST", body: fd });
     $("#repOut").textContent = JSON.stringify(r, null, 2);
     if (r.ok) { toast(`✓ swapped ${target} — current.swf updated`); syncDl();
       const dl = $("#dlFlash"); dl.classList.remove("flash"); void dl.offsetWidth; dl.classList.add("flash"); }
     else toast(`swap failed — see log`);
     return r;
   } catch (e) { $("#repOut").textContent = String(e); toast("swap failed"); }
+  finally { endJob(); }
 }
 $("#mBtn").onclick = () => doReplace($("#mTarget").value.trim(), $("#mFile").files[0], $("#mFmt").value.trim());
 
@@ -321,12 +447,18 @@ $("#health").onclick = async () => {
 };
 /* ---------- backend picker (split hosting) ---------- */
 $("#apiSave").onclick = () => {
+  if (jobBusy) return;
   const v = $("#apiBase").value.trim().replace(/\/+$/, "");
+  if (v && !/^https?:\/\//i.test(v)) return toast("API base must use http:// or https://.");
+  if (location.protocol === "https:" && /^http:/i.test(v)) return toast("HTTPS pages require an HTTPS backend.");
+  resetJob(); document.dispatchEvent(new Event("swfselected"));
   try { localStorage.setItem("jpexs.apiBase", v); } catch {}
   syncApiState(); toast(v ? "backend → " + v : "backend → same-origin");
 };
 $("#apiClear").onclick = () => {
-  try { localStorage.removeItem("jpexs.apiBase"); } catch {}
+  if (jobBusy) return;
+  resetJob(); document.dispatchEvent(new Event("swfselected"));
+  try { localStorage.setItem("jpexs.apiBase", ""); } catch {}
   syncApiState(); toast("backend → same-origin");
 };
 syncApiState();
@@ -358,11 +490,14 @@ $$("#edBar .tool").forEach(b => b.onclick = () => {
   updateRing(lastClient);
 });
 function openPaint(url, target, name) {
+  if (jobBusy) return;
+  const session = jobSession, editor = ++editorSession;
   edTarget = target; edName = name || `${target}.png`;
   $("#edTitle").textContent = `🎨 ${edName} → id ${target} (bounded box = exact pixels)`;
   const img = new Image();
   img.crossOrigin = "anonymous"; // split hosting: backend is cross-origin; without this the canvas taints and paint tools die silently
   img.onload = () => {
+    if (jobBusy || session !== jobSession || editor !== editorSession) return;
     ed.width = img.naturalWidth; ed.height = img.naturalHeight;
     ectx.globalCompositeOperation = "source-over"; ectx.globalAlpha = 1;
     ectx.drawImage(img, 0, 0);
@@ -472,7 +607,7 @@ function cleanEdges() {
   toast(cleared ? `🧹 cleaned ${cleared} spill pixel(s) outside silhouette` : "edges already clean ✓");
 }
 $("#edClean").onclick = cleanEdges;
-$("#edClose").onclick = () => { $("#edWrap").style.display = "none"; discardMasks(); };
+$("#edClose").onclick = () => { editorSession++; $("#edWrap").style.display = "none"; discardMasks(); };
 function snapshot() { undoStack.push(ectx.getImageData(0, 0, ed.width, ed.height)); if (undoStack.length > undoLimit) undoStack.shift(); }
 $("#edUndo").onclick = () => { const s = undoStack.pop(); if (s) ectx.putImageData(s, 0, 0); };
 $("#edReset").onclick = () => { while (undoStack.length > 1) undoStack.shift(); $("#edUndo").click(); };
@@ -556,25 +691,33 @@ addEventListener("pointerup", () => { drawing = false; panning = false; });
 $("#edDl").onclick = () => ed.toBlob(b => {
   const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = edName; a.click();
 });
-$("#edSave").onclick = () => ed.toBlob(async b => {
-  const r = await doReplace(edTarget, new File([b], edName, { type: "image/png" }), "");
-  if (r && r.ok) { discardMasks(); toast(`✓ painted ${edName} saved into SWF`); }
-}, "image/png");
+$("#edSave").onclick = () => {
+  const session = jobSession, editor = editorSession, target = edTarget, name = edName;
+  ed.toBlob(async b => {
+    if (jobBusy || session !== jobSession || editor !== editorSession) return;
+    if (!b) return toast("Could not encode edited image.");
+    const r = await doReplace(target, new File([b], name, { type: "image/png" }), "");
+    if (r && r.ok) { discardMasks(); toast(`Painted ${name} saved into SWF`); }
+  }, "image/png");
+};
 
 /* ---------- script editor ---------- */
 let asTarget = null, asName = "script.as";
 async function openCode(url, target, name) {
+  if (jobBusy) return;
+  const session = jobSession, editor = ++editorSession;
   asTarget = target; asName = name || (target + ".as");
   $("#asTitle").textContent = `📝 ${asName}`;
   $("#asText").value = "loading…";
   $("#asWrap").style.display = "block";
   try {
-    const t = await fetch(url).then(r => r.text());
+    const t = await fetch(url).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); });
+    if (jobBusy || session !== jobSession || editor !== editorSession) return;
     $("#asText").value = t; $("#asInfo").textContent = `${t.length} chars`;
-  } catch { $("#asText").value = "// load failed"; }
+  } catch (e) { if (session === jobSession && editor === editorSession) $("#asInfo").textContent = `Load failed: ${e.message}`; }
 }
 $("#asText").addEventListener("input", e => $("#asInfo").textContent = `${e.target.value.length} chars`);
-$("#asClose").onclick = () => $("#asWrap").style.display = "none";
+$("#asClose").onclick = () => { editorSession++; $("#asWrap").style.display = "none"; };
 $("#asDl").onclick = () => {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([$("#asText").value], { type: "text/plain" }));
@@ -585,7 +728,7 @@ $("#asSave").onclick = async () => {
   if (r && r.ok) toast(`✓ ${asName} compiled into SWF`);
 };
 addEventListener("keydown", e => {
-  if (e.key === "Escape") { $("#edWrap").style.display = "none"; $("#asWrap").style.display = "none"; discardMasks(); }
+  if (e.key === "Escape") { editorSession++; $("#edWrap").style.display = "none"; $("#asWrap").style.display = "none"; discardMasks(); }
   if (e.code === "Space" && $("#edWrap").style.display === "block" && !/INPUT|TEXTAREA|SELECT|BUTTON/.test(e.target.tagName)) {
     spaceDown = true; e.preventDefault(); // space-drag pans the zoomed canvas
   }
@@ -603,13 +746,16 @@ addEventListener("keyup", e => { if (e.code === "Space") spaceDown = false; });
   const fileInput = $("#swf");
   // Keep raw bytes in-browser on file pick (preview/inspect need no upload).
   fileInput.addEventListener("change", async () => {
+    if (!beginJob("Reading local SWF...")) return;
+    resetJob(); document.dispatchEvent(new Event("swfselected"));
     const f = fileInput.files[0];
-    if (!f || !hasClient) return;
     try {
+      if (!f || !hasClient) return;
       SWFClient.localBytes = new Uint8Array(await f.arrayBuffer());
       SWFClient.localName = f.name;
-      $("#localInfo").textContent = `${f.name} — ${(f.size/1024).toFixed(1)} KB held locally ✓ (inspect/preview ready; Upload still enables FFDec export/replace)`;
+      $("#localInfo").textContent = `${f.name}: ${(f.size/1024).toFixed(1)} KB held locally; inspect/preview ready. Upload sends it to the backend.`;
     } catch (e) { $("#localInfo").textContent = "could not read file locally: " + e.message; }
+    finally { endJob(); }
   });
   async function localInspect() {
     if (!hasClient) return null;
@@ -682,6 +828,17 @@ addEventListener("keyup", e => { if (e.code === "Space") spaceDown = false; });
     if (hasClient && typeof SWFClient.ensureWasm === "function") SWFClient.ensureWasm();
   } catch { /* never break startup for an optional engine */ }
 })();
+for (const selector of ["#btnLocalInspect", "#btnPreviewLocal", "#btnPreviewPatched", "#tags", "#health"]) {
+  const button = $(selector), handler = button.onclick;
+  button.onclick = async () => {
+    if (!beginJob("Loading inspection or preview...")) return;
+    try { await handler(); }
+    catch (e) { $("#tagsOut").textContent = e.message; toast(e.message); }
+    finally { endJob(); }
+  };
+}
+syncDl();
 </script>
+<script src="./clipper.js"></script>
 </body>
 </html>

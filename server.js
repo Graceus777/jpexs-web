@@ -7,6 +7,7 @@ const { execFile } = require("child_process");
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
+const { installCostume } = require("./costume");
 
 const PORT = process.env.PORT || 3000;
 const FFDEC_BIN =
@@ -130,6 +131,8 @@ function resetDir(dir) {
     console.error(`resetDir: mkdir failed for ${dir} (${e.code || e.message})`);
   }
 }
+
+installCostume(app, { workDir: WORK_DIR, runFfdec, listFilesRecursive });
 
 // --- API ---
 

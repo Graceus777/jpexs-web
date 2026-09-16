@@ -21,7 +21,9 @@ Prereqs on the VM: Docker + compose plugin, ports 22/80/443 open (cloud security
 
 ```powershell
 npm install
+pip install -r clipper/requirements.txt   # Python + Pillow, for POST /api/costume (image-to-clothing-SWF)
 npm start   # http://localhost:3000, needs Java + FFDec (override: $env:FFDEC_BIN="...\ffdec-cli.exe")
+npm test    # Node integration tests incl. live FFDec TOP/BOTTOMS compile when FFDec is installed
 ```
 
 ## Point the frontend at a backend

@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PORT=3000
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openjdk-17-jre-headless unzip curl ca-certificates \
+ && apt-get install -y --no-install-recommends openjdk-17-jre-headless unzip curl ca-certificates python3 python3-venv \
  && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /opt/ffdec /data/work /app \
@@ -24,7 +24,11 @@ RUN mkdir -p /opt/ffdec /data/work /app \
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY server.js ./
+COPY clipper ./clipper
+RUN python3 -m venv /opt/clipper-venv \
+ && /opt/clipper-venv/bin/pip install --no-cache-dir -r clipper/requirements.txt
+ENV PYTHON_BIN=/opt/clipper-venv/bin/python
+COPY server.js costume.js ./
 COPY public ./public
 
 EXPOSE 3000
