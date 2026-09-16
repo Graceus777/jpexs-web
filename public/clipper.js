@@ -112,6 +112,18 @@
   document.addEventListener("jobbusy", cancelStroke);
   document.addEventListener("jobidle", controls);
   document.addEventListener("swfselected", resetSelection);
+  async function refreshLoad() {
+    const el = $("#clipLoad");
+    try {
+      const q = await requestJson(api("/api/costume/queue"));
+      const bits = [q.active ? "1 compiling" : "idle"];
+      if (q.pending) bits.push(`${q.pending} waiting`);
+      bits.push(`${q.completedLast5Min || 0} done in last 5 min`);
+      el.textContent = `Server load: ${bits.join(" · ")}`;
+    } catch { el.textContent = "Server load: unavailable"; }
+  }
+  setInterval(() => { if (!document.hidden) refreshLoad(); }, 10000);
+  refreshLoad();
   $("#clipSize").oninput = () => $("#clipSizeLabel").textContent = `${$("#clipSize").value} px`;
   $("#clipUndo").onclick = () => { if (jobBusy || stroke) return; if (history.length) mask = history.pop(); render(); };
   $("#clipClear").onclick = () => { if (jobBusy || stroke) return; remember(mask.slice()); mask.fill(0); render(); };
@@ -190,9 +202,10 @@
         const regions = Array.isArray(r.regions) ? r.regions.join(", ") : String(r.regions || "none reported");
         status(`SWF ready: ${(Number(r.bytes || 0) / 1024).toFixed(1)} KB. Regions: ${regions}. ${r.exportError ? "Asset export failed; download the SWF or retry Images export below." : "Edit the image cards below, then download current.swf."}`);
         renderExports(r, "image");
+        refreshLoad();
         return;
       }
-      if (job.status === "error") return status(`Process failed: ${(job.error && job.error.message) || "unknown error"}`);
+      if (job.status === "error") { refreshLoad(); return status(`Process failed: ${(job.error && job.error.message) || "unknown error"}`); }
       if (job.status === "queued") {
         const q = job.queue || {};
         status(`Queued — #${job.position || 1} in line (${q.pending || 0} waiting, ${q.completedLast5Min || 0} done in last 5 min). This continues in the background; starting another upload stops tracking it here.`);
