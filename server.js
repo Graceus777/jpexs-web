@@ -231,31 +231,74 @@ app.post("/api/swf/:id/replace", upload.single("file"), async (req, res) => {
   }
 });
 
+// Remove whole characters (sprites/shapes): FFDec -removeCharacter.
+// Unlike -replace with a blank PNG (which silently does nothing for sprite
+// IDs), this actually drops the DefineSprite so splash screens etc. vanish.
+app.post("/api/swf/:id/remove", async (req, res) => {
+  const id = safeId(req.params.id);
+  if (!id) return res.status(400).json({ error: "bad id" });
+  const p = swfPaths(id);
+  if (!fs.existsSync(p.current))
+    return res.status(404).json({ error: "swf not found" });
+  const targets = req.body.targets;
+  if (
+    !Array.isArray(targets) || !targets.length || targets.length > 20 ||
+    !targets.every(t => /^\d{1,6}$/.test(String(t)))
+  ) {
+    return res.status(400).json({ error: "targets must be a non-empty array of up to 20 numeric character IDs" });
+  }
+  const tmpOut = path.join(p.dir, "current.next.swf");
+  try {
+    const r = await runFfdec(["-removeCharacter", p.current, tmpOut, ...targets.map(String)]);
+    fs.renameSync(tmpOut, p.current);
+    res.json({ ok: true, removed: targets.map(String), bytes: fs.statSync(p.current).size, log: (r.stdout + r.stderr).slice(0, 4000) });
+  } catch (e) {
+    try { fs.unlinkSync(tmpOut); } catch {}
+    res.status(500).json({ error: String(e.message), stdout: e.stdout, stderr: e.stderr });
+  }
+});
+
 // 1x1 transparent PNG used to blank assets (delete + filtered preview).
 const BLANK_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
   "base64"
 );
 
-// Preview-only copy with selected image characters blanked. current.swf untouched.
+// Preview-only copy with selected characters hidden. current.swf untouched.
+// - blanks: image character IDs blanked via -replace with a 1x1 PNG.
+// - remove: sprite (or other) character IDs dropped via -removeCharacter.
+// Legacy clients may send "sprite:4" entries inside blanks; those are routed
+// to removal so old UIs keep working.
 app.post("/api/swf/:id/preview-hidden", async (req, res) => {
   const id = safeId(req.params.id);
   if (!id) return res.status(400).json({ error: "bad id" });
   const p = swfPaths(id);
   if (!fs.existsSync(p.current))
     return res.status(404).json({ error: "swf not found" });
-  const blanks = req.body.blanks;
+  const rawBlanks = Array.isArray(req.body.blanks) ? req.body.blanks : [];
+  const rawRemove = Array.isArray(req.body.remove) ? req.body.remove : [];
+  const blanks = [];
+  const remove = rawRemove.map(String);
+  for (const entry of rawBlanks.map(String)) {
+    const sprite = entry.match(/^sprite:(\d{1,6})$/i);
+    if (sprite) remove.push(sprite[1]);
+    else blanks.push(entry);
+  }
   if (
-    !Array.isArray(blanks) || !blanks.length || blanks.length > 20 ||
-    !blanks.every(t => /^\d{1,6}$/.test(String(t)))
+    !blanks.every(t => /^\d{1,6}$/.test(String(t))) ||
+    !remove.every(t => /^\d{1,6}$/.test(String(t))) ||
+    (!blanks.length && !remove.length) ||
+    blanks.length + remove.length > 20
   ) {
-    return res.status(400).json({ error: "blanks must be a non-empty array of up to 20 numeric character IDs" });
+    return res.status(400).json({ error: "blanks/remove must total 1-20 numeric character IDs (sprite IDs as remove or 'sprite:N')" });
   }
   const tmpBase = path.join(WORK_DIR, "_tmp", `preview-${id}-${Date.now().toString(36)}`);
   const blankPng = tmpBase + "-blank.png";
   let tmpSwf = p.current;
+  const tmpFiles = [];
   const cleanup = () => {
     try { fs.unlinkSync(blankPng); } catch {}
+    for (const f of tmpFiles) { try { fs.unlinkSync(f); } catch {} }
     if (tmpSwf !== p.current) {
       try { fs.unlinkSync(tmpSwf); } catch {}
     }
@@ -266,9 +309,13 @@ app.post("/api/swf/:id/preview-hidden", async (req, res) => {
     for (const target of blanks.map(String)) {
       const out = `${tmpBase}-${step++}.swf`;
       await runFfdec(["-replace", tmpSwf, out, target, blankPng]);
-      if (tmpSwf !== p.current) {
-        try { fs.unlinkSync(tmpSwf); } catch {}
-      }
+      if (tmpSwf !== p.current) tmpFiles.push(tmpSwf);
+      tmpSwf = out;
+    }
+    if (remove.length) {
+      const out = `${tmpBase}-${step++}.swf`;
+      await runFfdec(["-removeCharacter", tmpSwf, out, ...remove.map(String)]);
+      if (tmpSwf !== p.current) tmpFiles.push(tmpSwf);
       tmpSwf = out;
     }
     res.sendFile(path.resolve(tmpSwf), cleanup);

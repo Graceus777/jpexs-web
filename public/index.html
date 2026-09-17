@@ -143,7 +143,7 @@
   <p><a id="dlFlash" href="#">⬇ download current.swf</a> (re-export after swapping to verify)</p>
   <details class="manual">
     <summary>Manual swap (advanced — type target + file by hand)</summary>
-    <p>Images/sounds: target = characterId (the number on the card). Scripts: target = dotted name (e.g. <code>com.example.MyClass</code>). Use bitmap IDs from an Images export — sprite or shape IDs report success but change nothing visible.</p>
+    <p>Images/sounds: target = characterId (the number on the card). Scripts: target = dotted name (e.g. <code>com.example.MyClass</code>). Use bitmap IDs from an Images export — sprite IDs via Replace report success but change nothing visible; to drop a whole sprite (e.g. splash) use its card 🗑 delete button.</p>
     <label>target <input id="mTarget" size="26" /></label>
     <label>format <input id="mFmt" placeholder="optional: lossless / jpeg3" size="20" /></label>
     <input type="file" id="mFile" />
@@ -346,11 +346,30 @@ function parseTarget(rel) {
 }
 // Only flat numeric raster bitmaps / sounds are swappable characters.
 // Sprite frames (DefineSprite_N/1.png) and shape SVGs resolve to unrelated
-// IDs that FFDec accepts but silently leaves unchanged.
+// IDs that FFDec -replace accepts but silently leaves unchanged, so those
+// cards stay download-only for Replace/Edit. Sprites can still be dropped
+// wholesale via -removeCharacter (Delete) or hidden in filtered preview.
 function isEditableTarget(path, target, kind, k) {
   if (kind === "script") return true;
   if (!/^\d+$/.test(target) || path.includes("/")) return false;
   return k === "snd" || (k === "img" && /\.(png|jpe?g)$/i.test(path));
+}
+// Sprites render from DefineSprite_N/1.png frames; removal drops the whole
+// character (splash screens included). hideKey keeps sprite hides distinct.
+function isRemovableTarget(path, target, kind) {
+  return kind === "sprite" && /^\d+$/.test(target) && path.includes("/");
+}
+function hideKeyFor(target, kind) {
+  return kind === "sprite" ? `sprite:${target}` : target;
+}
+function splitHidden(keys) {
+  const blanks = [], remove = [];
+  for (const key of keys) {
+    const m = String(key).match(/^sprite:(\d{1,6})$/i);
+    if (m) remove.push(m[1]);
+    else if (/^\d{1,6}$/.test(String(key))) blanks.push(String(key));
+  }
+  return { blanks, remove };
 }
 function kindOf(path) { if (IMG.test(path)) return "img"; if (AUD.test(path)) return "snd"; if (AS.test(path)) return "as"; return "other"; }
 
@@ -373,7 +392,7 @@ function renderExports(r, types) {
   const files = Array.isArray(r.files) ? r.files : [];
   $("#expInfo").textContent = r.exportError
     ? `SWF ready; asset export failed: ${typeof r.exportError === "string" ? r.exportError : JSON.stringify(r.exportError)}. Download is available; retry Export with Images.`
-    : `${files.length} files (${r.types || types}). Edit image bitmap IDs, not sprite IDs; sprite exports are not PNGs.`;
+    : `${files.length} files (${r.types || types}). Edit image bitmap IDs, not sprite IDs; sprite frames are previews — Delete/Hide drops the whole sprite.`;
   if (!Array.isArray(r.files) && !r.exportError) $("#expInfo").textContent = r.error || "No exported files returned. Retry Export with Images.";
   const session = jobSession, swf = id;
   const active = () => !jobBusy && session === jobSession && swf === id;
@@ -384,6 +403,8 @@ function renderExports(r, types) {
     const { target, kind } = parseTarget(f.path);
     const k = kindOf(f.path);
     const editable = isEditableTarget(f.path, target, kind, k);
+    const removable = isRemovableTarget(f.path, target, kind);
+    const hideKey = hideKeyFor(target, kind);
     const d = document.createElement("div"); d.className = "f";
     d.dataset.target = target; d.dataset.kind = kind;
     const badge = document.createElement("span"); badge.className = "badge";
@@ -412,10 +433,10 @@ function renderExports(r, types) {
         del.onclick = () => { if (active()) doReplace(target, new File([BLANK_PNG], `${target}-blank.png`, { type: "image/png" }), ""); };
         row.appendChild(del);
         const hide = document.createElement("button");
-        const syncHide = () => hide.textContent = hiddenTargets.has(target) ? "👁 unhide" : "🚫 hide";
+        const syncHide = () => hide.textContent = hiddenTargets.has(hideKey) ? "👁 unhide" : "🚫 hide";
         syncHide();
         hide.title = "Hide this asset in filtered preview only (mod file untouched)";
-        hide.onclick = () => { if (!active()) return; hiddenTargets.has(target) ? hiddenTargets.delete(target) : hiddenTargets.add(target); syncHide(); };
+        hide.onclick = () => { if (!active()) return; hiddenTargets.has(hideKey) ? hiddenTargets.delete(hideKey) : hiddenTargets.add(hideKey); syncHide(); };
         row.appendChild(hide);
       }
       const label = document.createElement("label"); label.className = "btn"; label.textContent = "Replace";
@@ -431,10 +452,23 @@ function renderExports(r, types) {
         e.preventDefault(); d.classList.remove("drop");
         if (active() && e.dataTransfer.files[0]) doReplace(target, e.dataTransfer.files[0], "");
       });
+    } else if (removable) {
+      const del = document.createElement("button"); del.textContent = "🗑 delete";
+      del.title = "Remove this whole sprite from current.swf (e.g. splash screens)";
+      del.onclick = () => { if (active()) doRemove(target); };
+      row.appendChild(del);
+      const hide = document.createElement("button");
+      const syncHide = () => hide.textContent = hiddenTargets.has(hideKey) ? "👁 unhide" : "🚫 hide";
+      syncHide();
+      hide.title = "Hide this sprite in filtered preview only (mod file untouched)";
+      hide.onclick = () => { if (!active()) return; hiddenTargets.has(hideKey) ? hiddenTargets.delete(hideKey) : hiddenTargets.add(hideKey); syncHide(); };
+      row.appendChild(hide);
     }
     d.appendChild(row);
     const hint = document.createElement("div"); hint.className = "dropHint";
-    hint.textContent = editable ? "Or drop a replacement file here" : "Download only; export Images to edit sprite bitmaps.";
+    hint.textContent = editable ? "Or drop a replacement file here"
+      : removable ? "Sprite frame preview — Delete/Hide drops the whole sprite; export Images to edit its bitmaps."
+      : "Download only; export Images to edit sprite bitmaps.";
     d.appendChild(hint); box.appendChild(d);
   });
 }
@@ -457,6 +491,24 @@ async function doReplace(target, file, format) {
     else toast(`swap failed — see log`);
     return r;
   } catch (e) { $("#repOut").textContent = String(e); toast("swap failed"); }
+  finally { endJob(); }
+}
+/* ---------- remove sprite ---------- */
+async function doRemove(target) {
+  if (!id) return alert("upload or compile first");
+  if (!target) return toast("Missing sprite target.");
+  if (!beginJob(`Removing sprite ${target}...`)) return;
+  $("#repOut").textContent = `removing sprite ${target} …`;
+  try {
+    const r = await requestJson(api(`/api/swf/${id}/remove`), { method: "POST",
+      headers: {"Content-Type":"application/json"}, body: JSON.stringify({ targets: [String(target)] }) });
+    $("#repOut").textContent = JSON.stringify(r, null, 2);
+    if (r.ok) { toast(`✓ removed sprite ${target} — current.swf updated`); syncDl();
+      hiddenTargets.delete(`sprite:${target}`); hiddenTargets.delete(String(target));
+      const dl = $("#dlFlash"); dl.classList.remove("flash"); void dl.offsetWidth; dl.classList.add("flash"); }
+    else toast(`remove failed — see log`);
+    return r;
+  } catch (e) { $("#repOut").textContent = String(e); toast("remove failed"); }
   finally { endJob(); }
 }
 $("#mBtn").onclick = () => doReplace($("#mTarget").value.trim(), $("#mFile").files[0], $("#mFmt").value.trim());
@@ -834,10 +886,11 @@ addEventListener("keyup", e => { if (e.code === "Space") spaceDown = false; });
   const btnFilt = $("#btnPreviewFiltered");
   if (btnFilt) btnFilt.onclick = async () => {
     if (!id) return toast("no SWF yet — Upload or Process first");
-    if (!hiddenTargets.size) return toast("nothing hidden — use 🚫 hide on an image card first");
+    if (!hiddenTargets.size) return toast("nothing hidden — use 🚫 hide on an image or sprite card first");
     try {
+      const { blanks, remove } = splitHidden([...hiddenTargets]);
       const buf = await fetch(api(`/api/swf/${id}/preview-hidden`), { method: "POST",
-        headers: {"Content-Type":"application/json"}, body: JSON.stringify({ blanks: [...hiddenTargets] }) })
+        headers: {"Content-Type":"application/json"}, body: JSON.stringify({ blanks, remove }) })
         .then(async r => { if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`); return r.arrayBuffer(); });
       if (!hasClient) return;
       await SWFClient.previewBytes("#ruffleBox", new Uint8Array(buf));
